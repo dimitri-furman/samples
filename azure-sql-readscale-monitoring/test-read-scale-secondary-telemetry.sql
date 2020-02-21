@@ -1,7 +1,7 @@
 /*
-This script shows how to collect telemetry data from the secondary replica for testing purposes in SSMS. 
+This script shows how to collect telemetry data from secondary replicas in SSMS. 
 
-Execute this script on the read-only secondary.
+Execute this script on the read-only secondary replica.
 Data is collected every 10 seconds in an infinite loop. Stop collection by cancelling the query.
 Note that collection will stop if the query window in SSMS is closed, or if connection is terminated for any other reason.
 
@@ -13,7 +13,21 @@ In SSMS, connect to the read-only secondary of a database as follows:
 Use the following query to confirm that you are connected to a read-only replica. The result should be READ_ONLY.
 
 SELECT DATABASEPROPERTYEX(DB_NAME(),'Updateability');
+
+For Hyperscale databases with more than one replica, execute this script in multiple query windows.
+Each script will output a message in the format "replica_id = <GUID>". 
+To ensure that telemetry is collected from all Hyperscale replicas, execute this script in additional query windows 
+until you see as many distinct replica_id values in the output as there are replicas.
+Query windows that return the same replica_id value as another query window can be closed.
 */
+
+DECLARE @ReplicaID varchar(36);
+
+-- Output replica_id on first iteration to distinguish among multiple Hyperscale read-scale replicas
+EXEC telemetry.spLoadResourceStatsOnReadOnly
+    @ReplicaID = @ReplicaID OUTPUT;
+
+RAISERROR('replica_id: %s', 0, 1, @ReplicaID) WITH NOWAIT;
 
 WHILE 1 = 1
 BEGIN

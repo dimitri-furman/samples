@@ -14,7 +14,7 @@ GO
 -- Create a table for sys.dm_db_resource_stats data
 -- IGNORE_DUP_KEY is used to avoid PK constraint violations when existing rows from sys.dm_db_resource_stats are inserted into the table.
 -- This happens because on each execution of telemetry.spLoadResourceStatsBatchOnReadOnly, we are loading all 256 rows from sys.dm_db_resource_stats.
--- This is done for simplicity, to avoid managing high watermark timestamp.
+-- This is done for simplicity, to avoid persisting and managing high watermark timestamp.
 CREATE TABLE telemetry.dm_db_resource_stats
 (
 end_time datetime NOT NULL,
@@ -84,6 +84,40 @@ CREDENTIAL = TelemetryTargetCredential
 );
 GO
 
+-- For Hyperscale, keep global temp tables used for tagging replicas around for the lifetime of a replica
+IF DATABASEPROPERTYEX(DB_NAME(), 'Edition') = 'Hyperscale'
+    ALTER DATABASE SCOPED CONFIGURATION SET GLOBAL_TEMPORARY_TABLE_AUTO_DROP = OFF;
+GO
+
+-- Create a stored procedure to assign a replica_id to each Hyperscale replica
+CREATE OR ALTER PROCEDURE telemetry.spAssignHyperscaleReplicaId
+AS
+
+SET XACT_ABORT, NOCOUNT ON;
+
+/*
+Hyperscale databases can have more than one read-scale secondary replica. 
+Hyperscale replicas do not have a built-in replica identifier to associate with telemetry data from each replica.
+Assign one here, by recording it in tempdb on a replica the first time this procedure executes on the replica.
+This identifier persists for the uptime of the replica and will change over time as each replica is restarted.
+However, it is sufficiently stable for many real-time troubleshooting and monitoring scenarios.
+*/
+IF OBJECT_ID('tempdb..##hs_replica') IS NULL
+    CREATE TABLE ##hs_replica
+    (
+    one_row_lock bit NOT NULL CONSTRAINT ck_hs_replica_one_row_lock CHECK (one_row_lock = 1) CONSTRAINT df_hs_replica_one_row_lock DEFAULT (1),
+    replica_id uniqueidentifier NOT NULL CONSTRAINT df_hs_replica_replica_id DEFAULT (NEWID())
+    CONSTRAINT pk_hs_replica PRIMARY KEY (one_row_lock)
+    );
+
+IF NOT EXISTS (
+              SELECT 1
+              FROM ##hs_replica
+              )
+    INSERT INTO ##hs_replica
+    DEFAULT VALUES;
+GO
+
 -- Create a stored procedure to load resource stats on the read-write primary
 -- This procedure will be executed using sys.sp_execute_remote call on the read-only secondary
 CREATE OR ALTER PROCEDURE telemetry.spLoadResourceStatsOnReadWrite
@@ -150,44 +184,88 @@ GO
 -- For sys.dm_db_resource_stats, this procedure should be executed at least once an hour to avoid gaps in resource stats data.
 -- It can be executed more frequently to reduce data latency.
 CREATE OR ALTER PROCEDURE telemetry.spLoadResourceStatsOnReadOnly
+    @ReplicaID uniqueidentifier = NULL OUTPUT
 AS
+DECLARE @ResourceStatsJson nvarchar(max); 
 
 SET XACT_ABORT, NOCOUNT ON;
 
--- Get current snapshot of resource stats into a JSON document
-DECLARE @ResourceStatsJson nvarchar(max); 
+-- Hyperscale, 0 to 4 read-scale replicas
+IF EXISTS (
+          SELECT 1
+          FROM sys.database_service_objectives
+          WHERE edition = 'Hyperscale'
+          )
+BEGIN
+    -- Tag the replica with replica_id
+    EXEC telemetry.spAssignHyperscaleReplicaId;
 
-WITH rs AS
-(
-SELECT  drs.end_time,
-        drs.avg_cpu_percent,
-        drs.avg_data_io_percent,
-        drs.avg_log_write_percent,
-        drs.avg_memory_usage_percent,
-        drs.xtp_storage_percent,
-        drs.max_worker_percent,
-        drs.max_session_percent,
-        drs.dtu_limit,
-        drs.avg_login_rate_percent,
-        drs.avg_instance_cpu_percent,
-        drs.avg_instance_memory_percent,
-        drs.cpu_limit,
-        drs.replica_role,
-        r.replica_id -- include replica identifier to detect when the secondary replica moves to a different node
-FROM sys.dm_db_resource_stats AS drs
-CROSS APPLY (
-            SELECT TOP (1) dbrs.replica_id
-            FROM sys.dm_database_replica_states AS dbrs
-            WHERE database_id = DB_ID() -- in elastic pools, get the current database only
-                  AND
-                  is_local = 1 -- get data only for the secondary read-only replica we are connected to
-            ) AS r
-)
-SELECT @ResourceStatsJson = (
-                            SELECT *
-                            FROM rs
-                            FOR JSON AUTO, INCLUDE_NULL_VALUES
-                            );
+    -- Return replica_id
+    SELECT @ReplicaID = replica_id
+    FROM ##hs_replica;
+
+    -- Get current snapshot of resource stats into a JSON document
+    WITH rs AS
+    (
+    SELECT  drs.end_time,
+            drs.avg_cpu_percent,
+            drs.avg_data_io_percent,
+            drs.avg_log_write_percent,
+            drs.avg_memory_usage_percent,
+            drs.xtp_storage_percent,
+            drs.max_worker_percent,
+            drs.max_session_percent,
+            drs.dtu_limit,
+            drs.avg_login_rate_percent,
+            drs.avg_instance_cpu_percent,
+            drs.avg_instance_memory_percent,
+            drs.cpu_limit,
+            drs.replica_role,
+            hr.replica_id -- include replica identifier to distinguish among multiple Hyperscale replicas
+    FROM sys.dm_db_resource_stats AS drs
+    CROSS JOIN ##hs_replica AS hr
+    )
+    SELECT @ResourceStatsJson = (
+                                SELECT *
+                                FROM rs
+                                FOR JSON AUTO, INCLUDE_NULL_VALUES
+                                );
+END
+ELSE -- Premium or Business Critical, at most one read-scale replica
+BEGIN
+    -- Return ReplicaID
+    SELECT TOP (1) @ReplicaID = dbrs.replica_id
+    FROM sys.dm_database_replica_states AS dbrs
+    WHERE database_id = DB_ID() -- in elastic pools, get the current database only
+            AND
+            is_local = 1; -- get data only for the secondary read-only replica we are connected to
+
+    -- Get current snapshot of resource stats into a JSON document
+    WITH rs AS
+    (
+    SELECT  drs.end_time,
+            drs.avg_cpu_percent,
+            drs.avg_data_io_percent,
+            drs.avg_log_write_percent,
+            drs.avg_memory_usage_percent,
+            drs.xtp_storage_percent,
+            drs.max_worker_percent,
+            drs.max_session_percent,
+            drs.dtu_limit,
+            drs.avg_login_rate_percent,
+            drs.avg_instance_cpu_percent,
+            drs.avg_instance_memory_percent,
+            drs.cpu_limit,
+            drs.replica_role,
+            @ReplicaID AS replica_id -- include replica identifier to detect when the secondary replica moves to a different node
+    FROM sys.dm_db_resource_stats AS drs
+    )
+    SELECT @ResourceStatsJson = (
+                                SELECT *
+                                FROM rs
+                                FOR JSON AUTO, INCLUDE_NULL_VALUES
+                                );
+END;
 
 -- Pass JSON document as a parameter to the stored procedure on the read-write replica.
 -- This loads resource stats into the telemetry.dm_db_resource_stats table.
@@ -200,6 +278,7 @@ GO
 
 -- Create a stored procedure to load database replica state data on the read-write primary
 -- This procedure will be executed using sys.sp_execute_remote call on the read-only secondary
+-- Not applicable to Hyperscale because sys.dm_database_replica_states is not applicable there.
 CREATE OR ALTER PROCEDURE telemetry.spLoadDbReplicaStatesOnReadWrite
     @DbReplicaStatesJson nvarchar(max)
 AS
@@ -278,6 +357,7 @@ GO
 -- Create a stored procedure to be periodically executed on the read-only secondary.
 -- For sys.dm_database_replica_states, this procedure should be executed as frequently as needed to get sufficiently granular data,
 -- for example every 10 seconds, or less frequently during idle periods.
+-- Not applicable to Hyperscale because sys.dm_database_replica_states is not applicable there.
 CREATE OR ALTER PROCEDURE telemetry.spLoadDbReplicaStatesOnReadOnly
 AS
 
