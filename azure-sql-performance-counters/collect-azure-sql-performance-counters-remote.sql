@@ -1,7 +1,7 @@
 /*
 DESCRIPTION:
 This script collects SQL performance counter values from sys.dm_os_performance_counters DMV 
-in a read-only database replica defined in the set-up-read-only-replica-collection.sql helper script.
+in a remote database defined in the set-up-remote-performance-counter-collection.sql helper script.
 
 It is intended for Azure SQL Database performance monitoring and diagnostic data collection,
 where the traditional methods of collecting PerfMon data are not available.
