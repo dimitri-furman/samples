@@ -1,5 +1,5 @@
 /*
-This helper script sets up a remote table to enable performance counter collection from a read-only database replica.
+This helper script sets up a remote table to enable performance counter collection from a remote database, which can be a read-only database replica.
 
 Replace placeholders with actual values and execute in the read-write database where collected data will be stored.
 
