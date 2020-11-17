@@ -1,10 +1,7 @@
 /*
-This helper script sets up a remote table to enable performance counter collection from a remote database, which can be a read-only database replica.
+This helper script sets up a remote table to enable performance counter collection from a remote database.
 
 Replace placeholders with actual values and execute in the read-write database where collected data will be stored.
-
-The "Allow Azure services and resources to access this server" option for the Azure SQL server hosting the monitored read-only replica must be enabled.
-Alternatively, a database-level firewall rule allowing traffic from 0.0.0.0 must exist in the monitored read-only replica.
 */
 
 IF NOT EXISTS (
