@@ -1,6 +1,6 @@
 # Goal
 
-This sample shows how to collect performance counters from an Azure SQL DB database and persist this data in a table.
+This sample shows how to collect periodic snapshots of performance counters from an Azure SQL DB database and persist this data in a table.
 
 # Description
 
