@@ -8,7 +8,7 @@ The **setup-read-scale-secondary-telemetry.sql** script creates objects to be us
 
 A client, such as an Azure Automation runbook or an Azure Functions application, connects to the secondary replica(s) of the database to be monitored, using *ApplicationIntent=ReadOnly* in the connection string.
 
-The client periodically executes stored procedures that collect telemetry data from DMVs, and load that data into tables on the read-write primary replica of the same database, or the read-write replica of another database, using the *sys.sp_execute_remote* stored procedure.
+The client periodically executes stored procedures that collect telemetry data from DMVs, and load that data into tables on the read-write primary replica of the same database, or the read-write replica of another database, using the *sys.sp_execute_remote* stored procedure. This procedure executes on the secondary replica, connecting to the primary replica to load data.
 
 Each stored procedure on the secondary may be executed on a different schedule depending on required data latency and sampling rate.
 
